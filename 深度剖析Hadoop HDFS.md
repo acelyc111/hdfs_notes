@@ -331,3 +331,78 @@ CacheAdmin是HDFS中缓存块的管理命令。在CacheAdmin中的每个操作�
 
 #### 2.2.4 HDFS中心缓存疑问点
 
+两个JIRA，略
+
+#### 2.2.5 HDFS CacheAdmin命令使用
+
+![cacheCLI](./cacheCLI.png)
+
+### 2.3 HDFS快照管理
+
+Snapshot
+
+#### 2.3.1 快照概念
+
+快照不是数据的简单拷贝，快照只做差异的记录
+
+因为不保存实际的数据，所以快照的生成往往非常迅速
+
+对于大多不变的数据，你所看到的数据其实是当前物理路径所指的内容，而发生变更的INode数据才会被快照额外拷贝，也就是前面所说的差异拷贝。
+
+#### 2.3.2 HDFS中的快照相关命令
+
+```
+$ hadoop fs￼
+  Usage: hadoop fs [generic options]￼
+      [-createSnapshot <snapshotDir> [<snapshotName>]]     // 在指定快照目录下创建快照￼
+      [-deleteSnapshot <snapshotDir> <snapshotName>]       // 在指定快照目录下删除快照￼
+      [-renameSnapshot <snapshotDir> <oldName> <newName>]  // 在指定快照目录下重命名某快照
+
+$ hdfs￼
+  Usage: hdfs [--config confdir] [--loglevel loglevel] COMMAND￼
+      where COMMAND is one of:￼
+          snapshotDiff           // 比较两个快照之间的不同或是比较当前内容与某快照之间的不同￼
+          lsSnapshottableDir     // 列出所属当前用户的所有的快照目录
+```
+
+一个快照目录下可以有多个快照文件，快照目录可以创建、删除自身目录下的快照文件，同时快照目录本身又被快照目录管理器所管理。
+
+#### 2.3.3 HDFS内部的快照管理机制
+
+##### 1. 快照结构关系
+
+- 快照管理器管理多个快照目录
+- 一个快照目录拥有多个快照文件
+
+##### 2. 快照调用流程
+
+SnapshotManager负责接收快照操作请求，继而调用相关类进行处理
+
+![snapshot](./snapshot.png)
+
+##### 3. 快照原理实现分析
+
+创建快照之前，需要对目标目录执行allowSnapshot操作，使得对目录能够有创建快照的权限
+
+会在快照目录下的隐藏目录 ./snapshot 下创建目标快照
+
+注意：不允许创建出网状关系（NestedSnapshots）的快照目录，就是目标快照目录的子目录和父目录不能够同样为快照目录
+
+计数：
+
+- 每次新增快照时，Counter计数会加1，然后做计数判断，这里的MaxSnapshotID指的是上限值：1<<24 - 1
+- 在每个目录下又会有快照总数的限制：1<<16
+
+获取快照的数据：
+
+- 如果当前快照id不是Snapshot.CURRENT_STATE_ID，则从对应的快照中获取结果，否则从当前的目录中获取结果
+
+最终的孩子列表是通过将diff发生过变更的INode信息与原目录节点信息进行结合，然后将一个新的子节点信息作为最终结果返回。diff中保留的INode就是当时快照创建时的INode信息。
+
+- HDFS中只为每个快照保存相对当时快照创建时间点发生过变更的INode信息，只是“存不同”
+- 获取快照信息时，根据快照Id和当前没发生过变更的INode信息，进行对应恢复
+
+快照之间的比差异功能对于使用者来说是非常实用的功能。因为通过比较不同时间点创建的快照，我们可以知道在此期间到底哪些文件目录被修改、创建或删除，甚至还能通过这些差异数据做元数据同步。
+
+（diff的代码实现，略）
+
