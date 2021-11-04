@@ -441,10 +441,7 @@ SnapshotManager负责接收快照操作请求，继而调用相关类进行处�
 如果机架感知功能关闭并不会导致副本放置策略的失败，但是副本放置策略在这种情况下会失效。
 
 ```
-<property>￼
-  <name>net.topology.script.file.name</name>￼
-  <value>/path/to/rackAware.py</value>￼
-</property>
+<property>￼  <name>net.topology.script.file.name</name>￼  <value>/path/to/rackAware.py</value>￼</property>
 ```
 
 #### 2.4.3 默认副本放置策略的分析
@@ -510,3 +507,152 @@ LCA（最近公共祖先算法）
 - 要满足同机架内最大副本数的限制
 
 #### 2.4.5 chooseTargets的调用
+
+略
+
+#### 2.4.6 BlockPlacementPolicyWithNodeGroup继承类
+
+在Rack机架层下还多了Node-Group层
+
+![NodeGroup](./NodeGroup.png)
+
+#### 2.4.7 副本放置策略的结果验证
+
+我们需要有一种方式能够检测块当前的详细位置，这样我们才能判断是否满足HDFS的副本放置策略
+
+```
+ hdfs fsck <path> -files -blocks -locations
+```
+
+### 2.5 HDFS内部的认证机制
+
+#### 2.5.1 BlockToken认证
+
+BlockToken认证是基于令牌的块级别粒度的验证
+
+略
+
+#### 2.5.2 HDFS的Sasl认证
+
+Sasl 是一套公开的认证机制，全称是Simple Authentication andSecurity Layer，中文翻译为“简单认证与安全层”，是一种用来扩充C/S模式验证能力的机制。
+
+##### 1. SaslClient与SaslServer的握手
+
+##### 2. DoSaslHandshake
+
+进入真正握手阶段的方法中，会提前一步进行用户、密码的构造过程
+
+![sasl_handshake](./sasl_handshake.png)
+
+##### 3. SaslInputStream和SaslOutputStream的“多余处理”
+
+#### 2.5.3 BlockToken认证与HDFS的Sasl认证对比
+
+##### 共同点
+
+- 没有空间局部的限制，都是数据全局的认证
+- 都会对数据读写效率造成一定程度的影响
+
+##### 不同点
+
+- 认证维度不同。
+
+  BlockToken认证的粒度较细，是针对块级别的认证，会对每次的块操作做认证。Sasl则是针对每次数据传输操作做认证。
+
+- 复杂性不同。
+
+  BlockToken的认证过程相对简单、清晰。而Sasl认证体系则复杂一些，会经过握手阶段，而且中间还可以配置相关的认证防护级别（Qop）的参数。论完整度而言，Sasl比BlockToken更加完整化、体系化一些。
+
+### 2.6 HDFS内部的磁盘目录服务
+
+HDFS在DataNode所在的节点中启动了多种磁盘目录的检测服务，来保证数据的完整性与一致性
+
+#### 2.6.1 HDFS的三大磁盘目录检测扫描服务
+
+##### DiskChecker（磁盘）
+
+**坏盘检测服务**。检测的级别是每个**磁盘**，检测的对象是FsVolume, FsVolume对应一个存储数据的磁盘。通过检测文件目录的访问权限以及目录是否可创建来判断目录所属磁盘的好坏，如果是坏盘，则此块盘将会被移除，上面的所有块都将被重新复制。
+
+##### DirectoryScanner（目录）
+
+目录扫描服务，对每块盘上的目录做扫描，使之**与内存中维护的块信息同步**。比如存储在磁盘上的块已经没有了，则内存中的块信息也应该被移除。
+
+##### VolumeScanner（块）
+
+磁盘目录扫描服务。从名称上来看，VolumeScanner与DirectoryScanner比较类似，但是VolumeScanner才是真正意义上的**块检查服务**。它会对已发现的“可疑块”做检查，判断此块是否为损坏块，如果是，则会将其汇报给NameNode。
+
+#### 2.6.2 DiskChecker：坏盘检测服务
+
+DiskChecker服务并不是一个周期性的定时任务，它只会在可能有坏盘出现的场景中被启动，然后执行
+
+##### 1. DiskChecker何时被调用
+
+![disk_cheker](./disk_cheker.png)
+
+##### 2. DiskChecker坏盘检测原理
+
+不同的BlockPool在每个盘上的存储是以BP打头的目录做区分的，类似格式如下，其中xx.xx. xx.xx代表的是当时做格式化操作的NameNode的ip地址：
+
+```
+BP-805037254-xx.xx.xx.xx-1460537955319
+```
+
+检测3类目录：
+
+- finalizedDir目录，已经完成后的块文件存储目录，层级不止一层，子目录下还存在子目录，所以在此处需要递归地检查。
+- tmpDir临时目录，存储临时副本的目录。
+- rbwDir目录，正在写操作的文件会存放于此目录，写完成之后，会被移入到finalizedDir目录中。
+
+检测过程：
+
+- 创建目录的检测。在这里会通过执行mkdir的方法来判断是否能够创建出目录。
+- 访问权限的检测。检测的逻辑是判断目录的是否能够进行读、写和执行。
+
+结果：
+
+- 坏盘被DiskChecker检测出来之后，会在NameNode的50070端口页面中显示出来，集群管理人员看到了可以做后续的处理工作。
+
+##### 3. DiskChecker注意点
+
+- 坏盘检测的误判
+
+- 大量的坏盘导致DataNode启动的失败
+
+  配置：dfs.datanode.failed.volumes.tolerated
+
+#### 2.6.3 DirectoryScanner：目录扫描服务
+
+阶段性扫描块以及块的元数据文件，使之与DataNode内存中维护的数据趋向一致。
+
+##### 1. scan生成diff差异报告
+
+diff差异报告的生成需要同时获取磁盘上的块信息报告和内存中的块信息报告，然后做具体维度的比较
+
+- 内存中的块丢失，而磁盘中的块还在
+- 磁盘中的块丢失，而内存中的块还在
+- 块元数据文件存在，而块文件不存在
+- 块元数据文件中的版本值或文件长度不一致
+- 块文件对象不一致
+
+##### 2. DataNode的更新操作
+
+比较完毕之后，就要进行相应数据的更新趋同操作了：checkAndUpdate
+
+DirectoryScanner是一项周期性的服务，默认间隔执行时间6小时。DirectoryScanner像是一个“园丁”的角色，将这段时间内出现的一些异常的数据处理掉，维护内存中的数据与磁盘上块数据的完整性与一致性。
+
+![directory_scanner](./directory_scanner.png)
+
+#### 2.6.4 VolumeScanner：磁盘目录扫描服务
+
+VolumeScanner是专门针对每块磁盘做块扫描的服务。块扫描类似于一次健康状况的检查。每个VolumeScanner扫描一块盘，并且每个VolumeScanner有属于它自己的独立线程。
+
+##### 可疑块
+
+在读数据时，如果发生了IO异常，则会进行可疑块的标记
+
+- BlockSender在扫描块的时候，特意对其进行了**限流**，防止其对DataNode正常读写的影响
+
+- 根据BlockSender读块时是否抛出IO异常来作为块好坏的评判标准
+
+### 2.7 小结
+
