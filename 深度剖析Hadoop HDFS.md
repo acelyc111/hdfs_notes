@@ -656,3 +656,335 @@ VolumeScanner是专门针对每块磁盘做块扫描的服务。块扫描类似�
 
 ### 2.7 小结
 
+## 第3章 HDFS的新颖功能特性
+
+- ViewFileSystem：可以让你随意变更存储的路径名称
+- WebHDFS：可以使得用户使用HDFS的成本变得更为简单
+- Encryption zone：在加密空间下，你看到的将只会是一堆加密的数据流
+- EC纠删码技术：它能够解决当下由于三副本备份策略导致的存储空间浪费的问题
+- 对象存储技术Ozone：它使得用户将数据存入到HDFS中变得更容易
+
+### 3.1 HDFS视图文件系统：ViewFileSystem
+
+ViewFileSystem只是一个“视图”，它只是在表面上做了改变的文件系统，而真实指向的文件系统其实并没有发生变化。
+
+HDFS视图文件系统可以跨越多个集群，保持文件系统在逻辑上的一致性。
+
+使用DistCp工具进行远程拷贝存在的问题：
+
+- 拷贝周期太长，如果数据量非常大，在机房总带宽有限的情况下，拷贝的时间将会非常长。
+- 数据在拷贝的过程中，一定会有原始数据的变更与改动，如何同步这些数据也是需要考虑的方面。
+
+#### 3.1.1 ViewFileSystem：视图文件系统
+
+将各个集群的真实文件路径与ViewFileSystem内新定义的路径进行关联映射。
+
+ViewFileSystem会在每个客户端中维护一份挂载关系表，就是上面说的集群物理路径->视图文件系统路径这样的指向关系。
+
+例如：（前面是ViewFileSystem中的路径，后者才是代表的真正集群路径）
+
+```
+        /user           -> hdfs://nn1/containingUserDir/user￼
+        /project/foo    -> hdfs://nn2/projects/foo￼
+        /project/bar    -> hdfs://nn3/projects/bar
+```
+
+![view_fs](./view_fs.png)
+
+#### 3.1.2 ViewFileSystem内部实现原理
+
+ViewFileSystem的作用是一个路由解析的角色
+
+##### 目录挂载点
+
+MountPoint：一对一
+
+MergeCount：一对多
+
+##### 挂载点的解析与存放
+
+所有的挂载目录点的位置都以字符串的形式被树形地拆开存放。换句话说，在ViewFileSystem中输入一个ViewFileSystem中配置的查询路径，会被逐层解析到对应的INodeDir
+
+##### ViewFileSystem的请求处理
+
+到挂载点树中进行逐层寻找。找到对应的文件系统后，就会把后面最终起作用的路径作为参数传入真实的文件系统中。
+
+##### ViewFileSystem的路径包装
+
+ViewFileSystem作为一个视图文件系统，要保持在逻辑上的完全一致，需要对文件返回的属性信息做一层包装和适配。
+
+##### ViewFileSystem性能优化
+
+可以直接保存到一个map的关系结构中，然后直接做字符串的简单比较，也不需要保存什么复杂的父亲-孩子的结构。
+
+#### 3.1.3 ViewFileSystem的使用
+
+这些挂载信息会维护在客户端的内存中，不需要重启NameNode和DataNode。
+
+##### 第一步，创建Viewfs名称
+
+在core-site.xml中配置fs.defaultFS属性，如下所示：
+
+```
+        <property>￼
+          <name>fs.defaultFS</name>
+          <value>viewfs://MultipleCluster</value>￼
+        </property>
+```
+
+##### 第二步，添加挂载关系：
+
+```
+        <property>￼
+          <name>fs.viewfs.mounttable.MultipleCluster.link./viewfstmp</name>￼
+          <value>hdfs://nn1/tmp</value>￼
+        </property>
+```
+
+### 3.2 HDFS的Web文件系统：WebHdfsFileSystem
+
+历史：在HDFS中，如果用户想要对HDFS中的文件或目录做操作，他需要了解NameNode对外开发的方法，然后调用DFSClient对应的方法。
+
+WebHdfsFileSystem让HDFS以Web的形式展现给用户，用户通过调用相应的REST API即可完成文件、目录的操作。
+
+#### 3.2.1 WebHdfsFileSystem的REST API操作
+
+##### 1）GET方式。
+
+###### 获取文件目录信息相关：
+
+- OPEN
+- GET_FILE_STATUS
+- LIST_STATUS
+- GET_CONTENT_SUMMARY
+- GET_FILE_CHECKSUM
+- GET_HOME_DIRECTORY
+- GET_BLOCK_LOCATIONS
+
+###### 获取属性、ACL访问相关：
+
+- GET_DELEGATION_TOKEN
+- GET_XATTRS
+- LIST_XATTRS
+- GET_ACL_STATUS
+- CHECK_ACCESS
+
+##### 2）PUT方式。
+
+###### 文件目录设置相关：
+
+- CREATE
+- MKDIRS
+- CREATE_SYMLINK
+- RENAME
+- SET_REPLICATION
+- SET_OWNER
+- SET_PERMISSION
+- SET_TIMESACL
+
+###### 访问属性相关：
+
+- RENEW_DELEGATION_TOKEN
+- CANCEL_DELEGATION_TOKEN
+- MODIFY_ACL_ENTRIES
+- REMOVE_ACL_ENTRIES
+- REMOVE_DEFAULT_ACL
+- REMOVE_ACL
+- SET_ACL
+- SET_XATTR
+- REMOVE_XATTR
+
+###### 快照操作相关：
+
+- CREATE_SNAPSHOT
+- RENAME_SNAPSHOT
+
+##### 3）POST方式：
+
+- APPEND：文件追加操作
+- CONCAT：文件拼接操作
+- TRUNCATE：文件截断操作
+
+##### 4）DELETE方式：
+
+- DELETE：文件/目录删除操作
+- DELETE_SNAPSHOT：快照删除操作
+
+#### 3.2.2 WebHdfsFileSystem的流程调用
+
+例如一个rename操作：
+
+```
+curl -i -X PUT "<HOST>:<PORT>/webhdfs/v1/<PATH>? op=RENAME&destination=<PATH>"
+```
+
+#### 3.2.3 WebHdfsFileSystem执行器调用
+
+略
+
+#### 3.2.4 WebHDFS的OAuth2认证
+
+##### OAuth2认证机制
+
+OAuth2认证将会涉及以下3个角色：
+
+- 服务端：用户使用服务端提供的各个资源。
+- 用户：服务端资源的真实拥有者。
+- 客户端：要访问服务端资源的第三方应用。
+
+下面是具体的认证步骤：
+
+1. 用户登录客户端向服务端请求一个临时令牌。
+2. 服务端通过客户端验证后，返回其临时令牌。
+3. 客户端获取临时令牌后，引导用户到服务端提供的授权页面。
+4. 用户输入帐号、密码后，表明用户授权此客户端访问所请求的资源。
+5. 授权过程完成后，客户端根据临时令牌从服务端获取访问令牌。
+6. 客户端获取访问令牌后向服务端访问受保护的资源。
+
+#### 3.2.5 WebHDFS的使用
+
+官方文档：https://hadoop.apache.org/docs/stable/hadoop-project-dist/hadoop-hdfs/WebHDFS.html
+
+### 3.3 HDFS数据加密空间：Encryption zone
+
+Encryption zone与之前的BlockToken验证相比，它更加注重于空间的特点，因为它只会对指定路径空间下的数据文件，做加、解密操作。
+
+#### 3.3.1 Encryption zone原理介绍
+
+HDFS Encryption zone加密空间是一种端到端的加密模式。其中的加、解密过程对于客户端来说是完全透明的。数据在客户端读操作的时候被解密，当数据被客户端写的时候进行加密，所以HDFS本身并不是一个主要的参与者。形象地说，在HDFS中你看到的只是一堆加密的数据流。
+
+1. 每个encryption zone会与每个encryption zone key相关联，而这个key会在创建encryption zone的时候被指定。
+2. 每个encryption zone中的文件会有其唯一的data encryption key（数据加密key），简称DEK。
+3. DEK不会被HDFS直接处理，HDFS只处理经过加密的DEK，叫做encrypted data encryption key，缩写就是EDEK。
+4. 客户端请求KMS服务去解密EDEK，然后利用解密后得到的DEK去读、写数据。
+
+#### 3.3.2 Encryption zone源码实现
+
+![encryption_zone](./encryption_zone.png)
+
+略
+
+#### 3.3.3 Encryption zone的使用
+
+略
+
+### 3.4 HDFS纠删码技术
+
+Hadoop Erasure Coding
+
+#### 3.4.1 纠删码概念
+
+它通过在原始数据中加入新的校验数据，使得各个部分的数据产生关联性。在一定范围内的数据出错情况下，通过纠删码技术都可以进行恢复。
+
+![ec](./ec.png)
+
+Parity部分就是校验数据块，我们把一行数据块组称为条带（strip），每行条带由n个数据块和m个校验块组成。原始数据块和校验数据块都可以通过现有的数据块进行恢复，规则如下：
+
+- 如果校验数据块发生错误，通过对原始数据块进行编码重新生成。
+- 如果原始数据块发生错误，通过校验数据块的解码可以重新生成。
+
+而且m和n的值并不是固定不变的，可以进行相应调整。
+
+#### 3.4.2 纠删码技术的优劣势
+
+##### 优势
+
+- 存储空间的节省。EC技术的单副本可以为集群节省多副本机制造成的额外存储空间的使用
+- 带宽流量的节省。EC的使用，会使得写入集群的数据总量减少，进一步为集群节省了带宽的消耗
+
+##### 劣势
+
+EC技术的优势确实明显，但是它的使用也是需要付出一定代价的。一旦数据需要恢复，它会造成两大资源的消耗：
+
+- 网络带宽的消耗，因为数据恢复需要去读其他的数据块和校验块。
+- 进行编码、解码计算时需要消耗CPU资源。
+
+##### 最佳实践
+
+最好的选择是用于冷数据的存储。以下两点原因可以支持这种选择：
+
+- 冷数据集群往往有大量的长期没有被访问的数据，数据规模确实会比较大，采用EC技术，可以大大减少副本数。
+- 冷数据集群基本稳定，耗资源量少，所以一旦进行数据恢复，也将不会对集群造成大的影响。
+
+#### 3.4.3 Hadoop纠删码概述
+
+注意：EC在Hadoop中的实现会直接改变原来HDFS默认的三副本策略，而副本数的减少会对MR任务的数据本地性造成一定影响。
+
+Hadoop EC同样采用了master/slave的主从结构，在NameNode、DataNode、Client端都有相应的服务和角色。
+
+![ec_arch](./ec_arch.png)
+
+#### 3.4.4 纠删码技术在Hadoop中的实现
+
+略
+
+### 3.5 HDFS对象存储：Ozone
+
+对象存储指的是目标数据从对象中进行读写，然后通过键值获取对应的对象。整个存储的形式为key-object的存储方式，这样的好处在于方便用户的使用，不需要走复杂的操作流程。
+
+#### 3.5.1 Ozone介绍
+
+- object：最小粒度级别的单位，代表的是最终存储数据的那个对象。
+
+  id：storageVolumeName/bucketName/objectKey
+
+- bucket：则是其上一级的组织对象。一个bucket下可以有一个或多个object。
+
+  id：storageVolumeName/bucketName
+
+- StorageVolume：在Ozone中，bucket存在于StorageVolume中，并且在StorageVolume中拥有唯一的名称。StorageVolume会对其所包含的bucket对象进行数量上的配额限制。
+
+在Ozone中，每个用户直接对应的是StorageVolume而不是一堆的bucket列表。
+
+![ozone](./ozone.png)
+
+#### 3.5.2 Ozone的高层级设计
+
+##### 1. 与HDFS共享DataNode数据存储
+
+Ozone的出现使得HDFS在使用方式上将会与原来块数据读写的方式有很大不同
+
+会以一个独立的block pool来存储Ozone上的数据，DataNode会同时为HDFS的block pool和Ozone的block pool存储数据
+
+##### 2. 存储容器（Storage Container）
+
+存储容器：指的是用来存储Ozone数据（其实也是bucket中的数据）和Ozone元数据的一个存储单元。
+
+Ozone没有一个类似于NameNode这样的中心控制节点。相反它是一个分离的元数据的存储与管理器，这些元数据分布式地存在于各个存储容器中。
+
+一个bucket会被分为很多分区（partion），每片分区会存储在一个存储容器中。
+
+##### 3. 存储容器标识符
+
+storage container标识符 -> 存储容器
+
+StorageContainer Manager（存储容器管理器）：管理storage container标识符
+
+对象的key、bucket -> storage container标识符
+
+##### 4. Storage Container Service中的过程调用
+
+![ozone_req](./ozone_req.png)
+
+##### 5. DataNode中的Ozone Handler
+
+被DataNode所持有并对外提供Ozone服务。Handler中包含了一个HTTP服务器并实现了Ozone REST API。OzoneHandler与Storage Container Manager之间进行交互来查询容器的位置，与DataNode中的存储容器交互实现不同的操作。
+
+##### 6. Storage Container Manager
+
+StorageContainer Manager从各个DataNode中收集心跳，处理存储容器的报告并跟踪每个存储容器的位置。它在内部维护了一个存储容器映射图，用前缀匹配的方式来查询存储容器。
+
+![storage_container_manager](./storage_container_manager.png)
+
+#### 3.5.3 Ozone的实现细节
+
+##### 映射object-key到存储容器
+
+在Ozone中，采用哈希分区的方式来映射key到它所存储的存储容器。当容器逐渐变大，我们会对此进行分割，并用扩展哈希算法重新映射key到对应的容器。
+
+##### 存储容器的实现
+
+#### 3.5.4 Ozone的使用
+
+### 3.6 小结
+
