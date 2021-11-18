@@ -1320,3 +1320,108 @@ Plan内部由各个Step组成，Step中会指定好源、目标磁盘。
 
 ### 6.1 HDFS镜像文件的解析与反解析
 
+镜像文件包含着集群中所有文件元数据的信息
+
+- 解析：把HDFS的镜像文件解析成用户可识别的文件形式，比如XML文件格式
+- 反解析：将XML格式的镜像文件重新转化为镜像文件原有的格式，即NameNode能够识别读取的格式
+
+#### 6.1.1 HDFS的FsImage镜像文件
+
+##### FsImage的存储位置
+
+```
+<property>￼
+  <name>dfs.namenode.name.dir</name>￼
+  <value></value>￼
+</property>
+```
+
+##### FsImage的存储信息
+
+基本信息：
+
+- 文件目录信息
+- 位置信息
+- 副本数
+- 权限信息
+
+#### 6.1.2 FsImage的解析
+
+几大数据块：
+
+- 命名空间类Section：包括namespaceId、rollingUpgradeStartTime等类型的变量
+- INode相关Section：包含了文件、目录相关INode的信息
+- FileUnderConstructionSection：正在构建中的文件信息
+- SnapShot：快照相关信息
+- SecretManager：安全管理相关信息
+- CacheManager：缓存管理相关信息
+- StringTable：权限相关的信息（辅助其他Section输出XML信息）
+
+#### 6.1.3 FsImage的反解析
+
+![fs_image](./fs_image.png)
+
+#### 6.1.4 HDFS镜像文件的解析与反解析命令
+
+HDFS关于镜像解析的命令主要以`hdfs oiv`打头，oiv为OffineImageView的缩写。
+
+5大处理器：
+
+- XML
+- ReverseXML
+- FileDistribution
+- Web
+- Delimited
+
+命令：`Usage: bin/hdfs oiv -p XML/ReverseXML -i INPUTFILE -o OUTPUTFILE`
+
+使用场景：
+
+- 统计文件大小分布：`bin/hdfs oiv -p FileDistribution -i INPUTFILE -o OUTPUTFILE`
+
+##### 用hdfs oev命令分析editlog文件
+
+oev是OffineEditsViewer的缩写
+
+分析editlog日志文件的工具命令
+
+### 6.2 DataNode数据处理中心DataXceiver
+
+数据读写的所有操作都会经过此类。
+
+> DataXceiver个数的多少，在一定程度上能反映出此节点的忙碌程度。
+
+#### 6.2.1 DataXceiver的定义和结构
+
+这是一个线程服务，执行入口是run方法
+
+![dataxceiver](./dataxceiver.png)
+
+#### 6.2.2 DataXceiver下游处理方法
+
+- readBlock
+
+  读取块信息的操作，一般用于远程读或者本地读操作
+
+- writeBlock
+
+  写块操作，将参数传入的数据块写入目标节点列表中
+
+- transferBlock
+
+  传输指定副本到目标节点列表中
+
+- copyBlock
+
+  拷贝块信息数据，与readBlock原理类似，都用到了BlockSender的send方法
+
+- replaceBlockreplaceBlock
+
+  在DataXceiver中更接近的意思是moveBlock，此操作一般会在数据平衡的时候被调用到
+
+- blockChecksum
+
+  从文件元信息头部读取校验和数据
+
+#### 6.2.3 ShortCircuit
+
