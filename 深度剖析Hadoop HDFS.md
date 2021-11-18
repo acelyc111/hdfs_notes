@@ -1146,3 +1146,177 @@ UC的全称是UnderConstruction，正在构建的意思，表明此块正在进�
 
 ## 第5章 HDFS的流量处理
 
+### 5.1 HDFS的内部限流
+
+HDFS内部限流的意思是指在HDFS中对数据流量进行限制。
+
+一旦有大规模数据流量持续地在传输，就有可能影响到服务的正常运行，如何对这些场合进行流量的限制就显得格外重要了。
+
+#### 5.1.1 数据的限流
+
+数据流分类：
+
+- 普通任务数据流：读写数据操作
+- Balancer数据平衡数据流传输
+- Fsimage镜像文件的上传下载数据流传输
+- VolumeScanner磁盘扫描时的数据流传输
+
+#### 5.1.2 DataTransferThrottler限流原理
+
+在DataTransferThrottler类中的主要限流思想是通过单位时间段内限制指定字节数的方式来控制平均传输速度的。如果发现IO传输速度过快，超过规定时间内的带宽限定字节数，则会进行等待操作，等待下一个带宽传输周期的到来。
+
+![throttler](./throttler.png)
+
+影响带宽平均传输速率的指标不仅仅只有传入的带宽速度上限值参数，周期的设置同样也很重要。带宽周期设小了，发生等待的次数会相对变多，最后的带宽平均速度就会变低。
+
+#### 5.1.3 数据流限流在Hadoop中的使用
+
+![throttler1](./throttler1.png)
+
+##### 1. Balancer
+
+数据Balancer平衡的操作
+
+##### 2. TransferFsImage
+
+TransferFsImage指的是镜像文件的上传下载过程。
+
+##### 3. VolumeScanner
+
+磁盘扫描，磁盘扫描的目的是为了发现坏的块。坏的块一般发生在读操作异常的情况下，所以这个阶段读的块会被列为可疑块。
+
+#### 5.1.4 Hadoop限流优化点
+
+- DataTransferThrottler的周期时间存在硬编码的现象，周期长短的设置对于带宽的影响也不容忽视，目前的设置是500毫秒。
+- 并没有在正常的读写块操作上做限制
+
+#### HDFS的Quota限制
+
+Quota配额机制。HDFS中的配额机制指的是对于每个目录，我们可以设置该目录下的存储空间使用（space count）和命名空间使用（namespace count）计数，命名空间在此可理解为子文件数。
+
+通过配额机制我们可以很好地防止在目录下创建过多的文件或写入过量的数据。否则，就会抛出异常。
+
+### 5.2 数据平衡
+
+维护集群各个节点间数据的平衡是一项基本的运维工作。
+
+Balancer工具的作用是将数据块从高数据使用量节点移动到低数据使用量节点，从而达到数据平衡的效果。
+
+#### 5.2.1 Balancer和Dispatcher
+
+Balancer和Dispatcher是与HDFS Balancer操作最紧密关联的类。
+
+- Balancer类负责找出<source, target>这样的起始、目标节点对，然后存入到Dispatcher类中
+- 通过Dispatcher对象进行分发。不过在分发之前，会进行块的验证，判断此块是否能被移动，这里会涉及一些条件的判断。
+  - 待移动的块不是正在被移动的块
+  - 在目标节点上没有此移动块的副本
+  - 移动之后，不同机架上的块的数量应该是不变的￼ ￼ 
+
+#### 5.2.2 数据不平衡现象
+
+- 客户端长期写文件数据导致不均等的现象。部分机器写的数据偏大，而部分机器写的数据则偏小。长期积累导致了数据的不平衡
+- 新节点的上线。集群新节点部署上线时，上面存储的数据都是从零开始的，所以此时也同样需要从别的机器中同步大量的数据。
+
+#### 5.2.3 Balancer性能优化
+
+Balancer工具是专门用来解决数据不平衡问题的。但也存在一些问题：
+
+- 大数据块在相同时间段内数据平衡效率要远高于小数据块
+- 加大数据平衡的带宽：`hdfs dfsadmin -setBandwidth <bandwidth> `。但这有可能影响正常的读写。
+- 制定目标节点进行数据平衡：使用-include、-exclude参数，专门对节点数据量少于平均值和数据量大于平均值的节点做数据平衡
+- 新增参数：
+  - blockBytesNum最小字节限制：在每次筛选块的时候，额外做一次块大小的筛选判断
+  - maxIterationTime每次迭代最长时间限制
+  - maxNoPendingMoveIterations没有可移动块情况下的最大迭代次数
+  - noPendingMoveSleepTime没有可移动块时的睡眠时间。这个参数指的是Balancer程序在没有找到可移动块前提下的缓冲时间
+
+### 5.3 HDFS节点内数据平衡
+
+磁盘间数据的不同会造成磁盘IO压力的不同
+
+DiskBalancer工具：操作的范围是在一个节点内
+
+#### 5.3.1 磁盘间数据不平衡现象及问题
+
+磁盘间数据不平衡的现象源自于长期写操作时数据大小的不均衡。因为每次写操作可以保证写磁盘的顺序性，但是无法保证每次写入的数据量都是一个规模大小。
+
+不均衡带来的问题：
+
+- 磁盘间数据不平衡间接引发了磁盘IO压力的不同
+- 高使用率磁盘导致可选存储目录减少
+
+#### 5.3.2 传统的磁盘间数据不平衡解决方案
+
+- 节点下线再上线
+
+- 人工移动部分数据块存储目录
+
+  注意：数据目录的移动要保证准确性，否则会造成移动完目录后数据找不到的现象。
+
+#### 5.3.3 社区解决方案：DiskBalancer
+
+##### DiskBalancer的设计核心
+
+- Data Spread Report（数据分布式的汇报）
+
+  这是一个汇报的功能。也就是说，DiskBalancer工具能支持各个节点汇报磁盘块使用情况的功能，通过这个功能集群管理者能够了解到目前集群内使用率最高的一些节点、磁盘。
+
+- Disk Balancing
+
+  磁盘数据的平衡。在磁盘内数据平衡的时候，要考虑到各个磁盘存储类型的不同（异构存储）。目前DiskBalancer不支持跨存储类型的数据转移，所以目前都是要求在同一个存储类型下。
+
+##### DiskBalancer的架构设计
+
+###### Discover阶段
+
+通过计算各个节点内的磁盘使用情况，得出需要数据平衡的磁盘列表。这里会通过Volume Data Density（磁盘使用密度）的概念作为一个评判的标准，这个标准值将会以节点总使用率作为比较值。
+
+用节点内各个盘的volumeDataDensity的绝对值来判断此节点内磁盘间数据的平衡情况。如果总的绝对值的和越大，说明磁盘间数据越不平衡。
+
+###### Plan阶段
+
+拿到上一阶段的汇报结果之后，将会进行执行计划的生成。
+
+Plan内部由各个Step组成，Step中会指定好源、目标磁盘。
+
+###### Execute阶段
+
+计划会被提交到各自的DataNode上，然后在DN中执行。
+
+在磁盘间数据平衡的过程中，高使用率的磁盘会移动数据块到相对低使用率的磁盘上，等到满足一定阈值关系的情况下时，DiskBalancer将会退出。
+
+配置控制：
+
+- 带宽的限制：`dfs.disk.balancer.max.disk.throughputInMBperSec`
+- 失败次数的限制：在拷贝数据块的时候，会对出现的IOException等异常累加计数，如果超出最大容忍值，DiskBalancer也会退出。
+- 数据平衡阈值控制：`dfs.disk.balancer.block.tolerance.percent`
+
+###### DiskBalancer的代码结构
+
+略
+
+###### DiskBalancer的命令执行
+
+1. 查询
+
+   `hdfs diskbalancer -query nodename.mycluster.com`
+
+2. 生成plan计划文件
+
+   `hdfs diskbalancer -uri hdfs://mycluster.com -plan node1.mycluster.com`
+
+3. 用生成好后的json格式的plan文件进行DiskBalancer的执行
+
+   `hdfs diskbalancer -execute /system/diskbalancer/nodename.plan.json`
+
+4. 如果发现执行了错误的plan，我们可以通过cancel命令进行清除
+   `hdfs diskbalancer -cancel /system/diskbalancer/nodename.plan.json`
+   或
+   `hdfs diskbalancer -cancel <planID> -node <nodename>`
+
+### 5.4 小结
+
+## 第6章 HDFS的部分结构分析
+
+### 6.1 HDFS镜像文件的解析与反解析
+
