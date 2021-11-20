@@ -1923,4 +1923,77 @@ Hadoop集群在使用的过程中，经常会伴随着节点的更新替换：�
 
 #### 9.2.1 节点下线操作的含义及问题
 
-节点下线，Decommision
+节点下线，Decommision，不对集群影响地将一个节点从集群中移除。
+
+在DataNode的下线过程中，做的主要操作还是块的重新复制，来达到HDFS默认的三副本数据备份的策略。
+
+当这些数据都拷贝完毕后，DataNode的节点状态会变为Decommissioned状态。这个时候就可以停止DataNode，彻底将机器关机并从集群中移除。
+
+##### 加回节点
+
+若因为某种原因，需要在这个过程中再将该节点加回：
+
+1. 将节点从exclude文件中移掉
+2. 重新执行`dfsadmin -refreshNodes`命令
+
+当然你会很高兴地看到，节点的状态确实重新变为了In Service的状态了。但是你会发现NameNode页面上的UnderReplicatedBlocks块的个数并没有减少，依然是中止下线操作前的数值。
+
+#### 9.2.2 死节点“复活”
+
+出现大量复制块的另外一个场景是出现死节点（Dead Node）。
+
+当一个DataNode长时间不汇报心跳，超过心跳检测超时时间后，此DataNode就会被认为是Dead Node。出现了Dead Node后，为了达到副本块的平衡，同样会进行大量块的拷贝，与下线操作极为类似。
+
+##### 复活
+
+当Dead Node重启之后，这些残余复制块很快就会减少到Dead Node之前的正常值。
+
+这是与decommision再加回是不同的
+
+##### 原因
+
+由于DataNode**重新注册**的动作，把自身的所有块重新上报给了NameNode。
+
+而下线节点从下线状态变为正常服务状态，节点不会进行重新注册的动作，原始的块没有被修改过也是不会上报的。
+
+#### 9.2.3 Decommission下线操作如何运作
+
+略
+
+#### 9.2.4 中止下线操作后移除残余副本块解决方案
+
+改代码，略
+
+### 9.3 DFSOutputStream的DataStreamer线程泄漏问题
+
+DFSOutputStream类是HDFS中的**数据写出类**，此类控制着HDFS数据块的写出操作。在DFSOutputStream类内部，通过DataStreamer、ResponseProcessor对象之间的合作，最终完成了数据包的传输与写出。但是在程序运行的过程中，DataStreamer存在部分线程泄漏的问题。
+
+#### 9.3.1 DFSOutputStream写数据过程及周边相关类、变量
+
+略
+
+#### 9.3.2 DataStreamer数据流对象
+
+略
+
+#### 9.3.3 ResponseProcessor回复获取类
+
+略
+
+#### 9.3.4 DataStreamer与DFSOutputStream的关系
+
+略
+
+#### 9.3.5 Streamer线程泄漏问题
+
+> 线程泄漏问题：该关闭的线程对象没有及时关闭
+
+##### Replace Datanode on Failure
+
+HDFS在构建Pipeline进行写数据的过程中，如果Pipeline中的某个DataNode写失败了，有的时候并不需要完全重新构建新的Pipeline。HDFS可以支持Replace Datanode on Failure的策略。
+
+也就是说，HDFS可以重新寻找一个新的DataNode来替换失败的DataNode。
+
+但是这需要保证一个前提：HDFS中有足够的候选节点。如果去除Pipeline中的所有DataNode，集群中并没有多余可选的DataNode，此策略将不会生效。
+
+### 9.4 小结
