@@ -1670,3 +1670,144 @@ $ hadoop distcp￼
 ### 7.4 DataNode迁移方案
 
 DataNode自身节点的搬迁。在搬迁的过程中，此节点将会停止服务，搬迁完成后，还可能涉及主机名、ip地址的变化。
+
+#### 7.4.1 迁移方案的目标
+
+##### 目标
+
+由于外界因素的影响，需要将原DataNode所在节点的机器从A机房换到B机房，其中会涉及主机名和ip地址的改变。
+
+最终的目标是DataNode迁移之后对集群不造成大的影响，服务依然可用，数据不发生丢失。
+
+##### 相关知识
+
+因为在DataNode迁移的时候，必定会导致迁移节点停止心跳，如果超过心跳检查超时时间，此节点就会被NameNode认为是死节点。为了满足块副本数要求，会造成集群内大量块复制的现象。
+
+如果想要在短时间内不使节点成为死节点，需要人工把心跳超时检查时间设大。
+
+参数：
+
+| 参数名                                  | 默认值 | 说明                                                         |
+| --------------------------------------- | ------ | ------------------------------------------------------------ |
+| dfs.namenode.heartbeat.recheck-interval | 300000 | This time decides the interval to check for expired datanodes. With this value and dfs.heartbeat.interval, the interval of deciding the datanode is stale or not is also calculated. The unit of this configuration is millisecond. |
+| dfs.heartbeat.interval                  | 3      | Determines datanode heartbeat interval in seconds.           |
+
+调参方式：
+
+1. 更新standby namenode的hdfs-site.xml的配置，并重启
+2. 等待standby namenode退出safemode之后，再stop active namenode，更新配置并重启
+
+#### 7.4.2 DataNode更换主机名、ip地址时的迁移方案
+
+（对文中使用的方案存疑）
+
+##### 步骤1: DataNode迁移测试
+
+在DataNode做迁移之前，进行测试文件的上传和RPC请求的测试，为了与后面的测试结果进行对比。
+
+##### 步骤2: DataNode重启
+
+重新启动DataNode，查看DataNode输出日志。
+
+##### 几点运维技巧
+
+- 使用`jps`命令查看NN/DN是否真正停止
+- 停止DN后，观察NN的Web界面，在超时后（默认630秒），该DN将被显示为dead状态，意为死节点
+- 在NN Web界面的待复制块（Number of Under-ReplicatedBlocks）指标，会显示正在进行拷贝的块副本数
+- DN在初次启动的时候由于缓存的dfsUsed值超过默认600秒会过期，需要重新执行du命令扫描DataNode上面的磁盘块进行dfsUsed使用量的计算，会消耗几分钟的时间
+  - 如果是立即停止，并马上重启DataNode，du过程则将会非常快
+  - 出现如下`Time taken`开头的日志代表磁盘扫描操作结束，DN启动成功了：
+
+```
+2016-01-06  16:05:08,181  INFO  org.apache.hadoop.hdfs.server.datanode.fsdataset.￼impl.FsDatasetImpl: Scanning block pool BP-1942012336-xx.xx.xx.xx-1406726500544￼ on volume /home/data/data/hadoop/dfs/data/data11/current...￼
+2016-01-06  16:05:08,181  INFO  org.apache.hadoop.hdfs.server.datanode.fsdataset.￼impl.FsDatasetImpl: Scanning block pool BP-1942012336-xx.xx.xx.xx-1406726500544￼ on volume /home/data/data/hadoop/dfs/data/data12/current...￼
+...
+2016-01-06  16:09:49,646  INFO  org.apache.hadoop.hdfs.server.datanode.fsdataset.￼impl.FsDatasetImpl:  Time  taken  to  scan  block  pool  BP-1942012336-xx.xx.xx.xx-￼1406726500544 on /home/data/data/hadoop/dfs/data/data7/current: 281466ms￼
+2016-01-06  16:09:54,235  INFO  org.apache.hadoop.hdfs.server.datanode.fsdataset.￼impl.FsDatasetImpl:  Time  taken  to  scan  block  pool  BP-1942012336-xx.xx.xx.xx-￼1406726500544 on /home/data/data/hadoop/dfs/data/data9/current: 286054ms
+```
+
+### 7.5 HDFS集群重命名方案
+
+#### 第一步：停止集群所有服务
+
+- 停止HDFS相关的服务
+- 停止YARN相关的服务
+
+#### 第二步：修改HDFS集群名称相关配置
+
+原集群名称假设为clusterA，目标名称为clusterB。
+
+##### core-site.xml
+
+```
+<property>￼
+  <name>fs.defaultFS</name>
+  <value>hdfs://clusterA</value>  # ￼将 hdfs://clusterA 替换为 hdfs://clusterB
+    <final>true</final>￼
+</property>
+```
+
+##### yarn-site.xml
+
+因为YARN部分应用相关的数据也会存放在HDFS之上，所以这部分的配置也是需要更新的。
+
+```
+<property>￼
+  <name>yarn.resourcemanager.fs.state-store.uri</name>￼
+  <value>hdfs://clusterA/logs/yarn/rmstore</value>￼  # ￼将 hdfs://clusterA 替换为 hdfs://clusterB
+</property>
+```
+
+##### hdfs-site.xml
+
+```
+# ￼将如下的 hdfs://clusterA 替换为 hdfs://clusterB
+<property>￼
+  <name>dfs.nameservices</name>￼
+  <value>clusterA</value>
+</property>￼
+<property>￼
+  <name>dfs.ha.namenodes.clusterA</name>
+  <value>nn1, nn2</value>￼
+</property>￼
+<property>￼
+  <name>dfs.namenode.rpc-address.clusterA.nn1</name>￼
+  <value>clusternn1:9000</value>￼
+</property>￼
+<property>￼
+  <name>dfs.namenode.rpc-address.clusterA.nn2</name>￼
+  <value>clusternn2:9000</value>￼
+</property>
+<property>￼
+  <name>dfs.namenode.http-address.clusterA.nn1</name>
+  <value>clusternn1:50070</value>￼
+</property>￼
+<property>￼
+  <name>dfs.namenode.http-address.clusterA.nn2</name>￼
+  <value>clusternn2:50070</value>￼
+</property>
+<property>￼
+  <name>dfs.client.failover.proxy.provider.clusterA</name>
+  <value>org.apache.hadoop.hdfs.server.namenode.ha.ConfiguredFailoverProxy￼Provider</value>
+￼</property>
+```
+
+#### 第三步：重新格式化HDFS所依赖的znode
+
+NameNode会把自身的集群名称与znode进行关联
+
+重新执行fotmat znode操作。在HDFS相关服务停止的情况下，执行format命令：
+
+```
+hdfs zkfc -formatZK
+```
+
+#### 第四步：启动并验证
+
+- 重启HDFS相关服务
+- 执行hadoop的fs命令是否可用
+- 最后启动YARN相关的服务，并提交一个wordcount任务到YARN上做测试
+
+### 7.6 HDFS的配置管理方案
+
+介绍一种基于Git的简单配置管理方案
