@@ -7,7 +7,7 @@ HDFS的数据存储包括两块：一块是HDFS内存存储，另一块是HDFS�
 - HDFS内存存储是一种十分特殊的存储方式，将会对集群数据的读写带来不小的性能提升
 - HDFS异构存储则能帮助我们更加合理地把数据存到应该存的地方
 
-### 1.1 HDFS内存存储
+### 1.1 HDFS内存存储，LAZY_PERSIST
 
 HDFS内存存储策略：LAZY_PERSIST 直接将内存作为数据存放的载体
 
@@ -17,7 +17,7 @@ HDFS内存存储策略：LAZY_PERSIST 直接将内存作为数据存放的载体
 
 ![lazy_persist](./lazy_persist.png)
 
-异步存储的大体步骤：
+内存存储的大体步骤：
 
 1. 对目标文件目录设置StoragePolicy为LAZY_PERSIST的内存存储策略
 2. 客户端进程向NameNode发起创建/写文件的请求
@@ -43,21 +43,21 @@ HDFS内存存储策略：LAZY_PERSIST 直接将内存作为数据存放的载体
 hdfs storagepolicies -setStoragePolicy -path <path> -policy LAZY_PERSIST
 ```
 
-- 调用对应的程序方法，比如调用暴露在外部的create文件方法，但是得带上参数`CreateFlag.LAZY_PERSIST`
+- 调用对应的程序方法，比如调用暴露在外部的`create`文件方法，但是得带上参数`CreateFlag.LAZY_PERSIST`
 
 ```
     FSDataOutputStream fos =
         fs.create(
             path,
             FsPermission.getFileDefault(),
-            EnumSet.of(CreateFlag.CREATE, CreateFlag.LAZY_PERSIST),
+            EnumSet.of(CreateFlag.CREATE, CreateFlag.LAZY_PERSIST),   # 指定为 CreateFlag.LAZY_PERSIST
             bufferLength,
             replicationFactor,
             blockSize,
             null);
 ```
 
-- 通过FileSystem的setStoragePolicy方法（2.8.0+）
+- 通过`FileSystem的setStoragePolicy`方法（2.8.0+）
 
 ```
 fs.setStoragePolicy(path, "LAZY_PERSIST");
@@ -67,24 +67,30 @@ fs.setStoragePolicy(path, "LAZY_PERSIST");
 
 ![FsDatasetImpl](./FsDatasetImpl.png)
 
-- RamDiskAsyncLazyPersistService：
+- RamDiskAsyncLazyPersistService
 
-  异步持久化线程服务，针对每一个磁盘块设置一个对应的线程池，需要持久化到给定磁盘的数据块会被提交到对应的线程池中去。每个线程池的最大线程数为1。
+  异步持久化线程服务，针对每一个磁盘块设置一个对应的线程池，需要持久化到给定磁盘的数据块会被提交到对应的线程池中去。
 
-- LazyWriter：
+  每个线程池的最大线程数为1。
+
+- LazyWriter
 
   这是一个线程服务，此线程会不断地从数据块列表中取出数据块，将数据块加入到异步持久化线程池RamDiskAsyncLazyPersistService中去执行。
 
-- RamDiskReplicaLruTracker：
+- RamDiskReplicaLruTracker
 
-  是副本块跟踪类，此类中维护了所有已持久化、未持久化的副本以及总副本数据信息。所以当一个副本被最终存储到内存中后，相应地会有副本所属队列信息的变更。当节点内存不足时，会将最近最少被访问的副本块移除。
+  副本块跟踪类，此类中维护了所有已持久化、未持久化的副本以及总副本数据信息。
 
+  当一个副本被最终存储到内存中后，相应地会有副本所属队列信息的变更。
+  
+  当节点内存不足时，会将最近最少被访问的副本块移除。
+  
   （代码解析略）
 
 #### 1.1.4 LAZY_PERSIST内存存储的使用
 
 1. 配置虚拟内存盘
-2. 将机器中已经完成好的虚拟内存盘配置到dfs.datanode.data.dir中，并带上RAM_DISK标签
+2. 将机器中已经完成好的虚拟内存盘配置到`dfs.datanode.data.dir`中，并带上`RAM_DISK`标签
 3. 设置具体的文件策略类型
 
 ### 1.2 HDFS异构存储
@@ -93,17 +99,14 @@ fs.setStoragePolicy(path, "LAZY_PERSIST");
 
 #### 1.2.1 异构存储类型
 
-RAM_DISK：内存存储（LAZY_PERSIST）
+- RAM_DISK：内存存储（LAZY_PERSIST）
+- SSD：固态硬盘存储
+- DISK：机械盘存储（默认）
+- ARCHIVE：主要指的是高密度存储介质，用于解决数据扩容的问题
 
-SSD：固态硬盘存储
+注意：HDFS并没有自动检测识别的功能，需要在配置属性时主动声明。
 
-DISK：机械盘存储（默认）
-
-ARCHIVE：主要指的是高密度存储介质，用于解决数据扩容的问题
-
-HDFS并没有自动检测识别的功能，需要在配置属性时主动声明。
-
-配置属性dfs.datanode.data.dir可以对本地对应存储目录进行设置，同时带上一个存储类型标签：
+配置属性`dfs.datanode.data.dir`可以对本地对应存储目录进行设置，同时带上一个存储类型标签：
 
 ```
 [SSD]file:///grid/dn/ssd0
@@ -113,9 +116,9 @@ HDFS并没有自动检测识别的功能，需要在配置属性时主动声明�
 
 HDFS异构存储可总结为以下三点：
 
-- DataNode通过心跳汇报自身数据存储目录的StorageType给NameNode。
-- 随后NameNode进行汇总并更新集群内各个节点的存储类型情况。
-- 待复制文件根据自身设定的存储策略信息向NameNode请求拥有此类型存储介质的DataNode作为候选节点。
+- DataNode通过心跳汇报自身数据存储目录的StorageType给NameNode
+- 随后NameNode进行汇总并更新集群内各个节点的存储类型情况
+- 待复制文件根据自身设定的存储策略信息向NameNode请求拥有此类型存储介质的DataNode作为候选节点
 
 （代码解析略）
 
@@ -149,15 +152,15 @@ DN上存储的策略ID从何而来：
 
 #### 1.2.6 HDFS异构存储策略的不足之处
 
-目前HDFS上还不能对文件目录存储策略变更做出自动的数据迁移。这里需要用户额外执行`hdfs -mover`命令做文件目录的扫描。在mover命令扫描的过程中，如果发现文件目录的实际存储类型与其所设置的storagePolicy策略不同，将会进行数据块的迁移，将数据迁移到相对应的存储介质中。
+目前HDFS上还不能对文件目录存储策略变更做出自动的数据迁移。需要用户额外执行`hdfs -mover`命令做文件目录的扫描。在mover命令扫描的过程中，如果发现文件目录的实际存储类型与其所设置的storagePolicy策略不同，将会进行数据块的迁移，将数据迁移到相对应的存储介质中。
 
 #### 1.2.7 HDFS存储策略的使用
 
 ```
 hdfs storagepolicies
-- setStoragePolicy
-- listPolicies
-- getStoragePolicy
+  - setStoragePolicy
+  - listPolicies
+  - getStoragePolicy
 ```
 
 最简单的使用方法是：
@@ -188,7 +191,7 @@ HDFS缓存的出现可以大大提高用户读取文件的速度，因为它是�
 
 利用mmap、mlock这样的系统调用将块数据锁入内存，以此达到在DataNode上缓存数据的效果。
 
-- mmap：mmap系统调用，它是一个内存映射调用。mmap主要作用是将一个文件或者其他对象映射进内存。
+> mmap系统调用，是一个内存映射调用，主要作用是将一个文件或者其他对象映射进内存。
 
 #### 2.1.2 缓存块的生命周期状态
 
@@ -240,28 +243,28 @@ NameNode中的CacheReplicationMonitor自身持有一个系统中的标准缓存�
 
 #### 2.1.7 HDFS缓存相关配置
 
+- `dfs.datanode.max.locked.memory`：空间大小，默认为0
+
 ```
-    <property>
-      <name>dfs.datanode.max.locked.memory</name>
-      <value>0</value>
-      <description>
-      DataNode用来缓存块的最大内存空间大小，单位用字节表示。系统变量 RLIMIT_MEMLOCK 至少需要设置得比此配置要大，否则DataNode会出现启动失败的现象。在默认情况下，此配置值为0，表名默认关闭内存缓存的功能。
-      </description>
-    </property>
+<property>
+  <name>dfs.datanode.max.locked.memory</name>
+  <value>0</value>
+  <description>
+    DataNode用来缓存块的最大内存空间大小，单位用字节表示。在默认情况下，此配置值为0，表名默认关闭内存缓存的功能。
+  </description>
+</property>
 ```
 
-其他配置：
-
-- `dfs.datanode.fsdatasetcache.max.threads.per.volume	：用于缓存块数据的最大线程数，这个线程数是针对每个存储目录而言，默认值为4
+- `dfs.datanode.fsdatasetcache.max.threads.per.volume`：用于缓存块数据的最大线程数，这个线程数是针对每个存储目录而言，默认值为4
 - `dfs.cachereport.intervalMsec`：缓存块上报间隔，默认10秒
 
 注意：
 
-- 此配置项会受系统最大可使用内存大小（RLIMIT_MEMLOCK）的影响，造成启动DataNode失败的现象
+- 若`dfs.datanode.max.locked.memory`大于系统最大可使用内存大小（RLIMIT_MEMLOCK），会造成启动DataNode失败的现象
 
   可以通过`ulimit -l <value>`命令对此进行调整
 
-- 此配置项并不是HDFS缓存机制所独有的，它与HDFS的LAZY_PERSIST策略会共享`dfs.datanode.max.locked.memory`配置
+- 此配置项并不是HDFS缓存机制所独有的，它与HDFS的LAZY_PERSIST策略会**共享**`dfs.datanode.max.locked.memory`配置
 
 ### 2.2 HDFS中心缓存管理
 
@@ -331,7 +334,7 @@ CacheAdmin是HDFS中缓存块的管理命令。在CacheAdmin中的每个操作�
 
 #### 2.2.4 HDFS中心缓存疑问点
 
-两个JIRA，略
+略
 
 #### 2.2.5 HDFS CacheAdmin命令使用
 
@@ -382,20 +385,20 @@ SnapshotManager负责接收快照操作请求，继而调用相关类进行处�
 
 ##### 3. 快照原理实现分析
 
-创建快照之前，需要对目标目录执行allowSnapshot操作，使得对目录能够有创建快照的权限
+创建快照之前，需要对目标目录执行`allowSnapshot`操作，使得对目录能够有创建快照的权限
 
-会在快照目录下的隐藏目录 ./snapshot 下创建目标快照
+会在快照目录下的隐藏目录`./snapshot`下创建目标快照
 
 注意：不允许创建出网状关系（NestedSnapshots）的快照目录，就是目标快照目录的子目录和父目录不能够同样为快照目录
 
-计数：
+###### 计数
 
-- 每次新增快照时，Counter计数会加1，然后做计数判断，这里的MaxSnapshotID指的是上限值：1<<24 - 1
-- 在每个目录下又会有快照总数的限制：1<<16
+- 每次新增快照时，Counter计数会加1，然后做计数判断，这里的MaxSnapshotID指的是上限值：`1 << 24 - 1`
+- 在每个目录下又会有快照总数的限制：`1 << 16`
 
-获取快照的数据：
+###### 获取快照的数据
 
-- 如果当前快照id不是Snapshot.CURRENT_STATE_ID，则从对应的快照中获取结果，否则从当前的目录中获取结果
+- 如果当前快照id不是`Snapshot.CURRENT_STATE_ID`，则从对应的快照中获取结果，否则从当前的目录中获取结果
 
 最终的孩子列表是通过将diff发生过变更的INode信息与原目录节点信息进行结合，然后将一个新的子节点信息作为最终结果返回。diff中保留的INode就是当时快照创建时的INode信息。
 
@@ -414,9 +417,11 @@ SnapshotManager负责接收快照操作请求，继而调用相关类进行处�
 
 - 元数据的差异比较
 
-  HDFS的快照能够提供diff比较的功能。比较的结果会展示相对于源端快照，目标快照中发生的文件目录的变更记录。这个差异结果可以用于数据的同步，比如快照在DistCp命令中的使用。比如用于实现集群数据间的同步。
+  HDFS的快照能够提供diff比较的功能。比较的结果会展示相对于源端快照和目标快照中发生的文件目录的变更记录。
+  
+  这个差异结果可以用于数据的同步，比如快照在DistCp命令中的使用，用于实现集群数据间的同步。
 
-### 2.4 HDFS副本放置策略(BlockPlacementPolicy)
+### 2.4 HDFS副本放置策略，BlockPlacementPolicy
 
 一个文件块的落盘过程：
 
@@ -430,9 +435,9 @@ SnapshotManager负责接收快照操作请求，继而调用相关类进行处�
 
 ##### BlockPlacementPolicyDefault策略
 
-1. 如果写请求方所在机器是其中一个DataNode，则直接存放在本地，否则随机在集群中选择一个DataNode
-2. 第二个副本存放于不同于第一个副本所在的机架
-3. 第三个副本存放于第二个副本所在的机架，但是属于不同的节点
+1. （本地写优先）如果写请求方所在机器是其中一个DataNode，则直接存放在本地，否则随机在集群中选择一个DataNode
+2. （机架）第二个副本存放于不同于第一个副本所在的**机架**
+3. （节点）第三个副本存放于第二个副本所在的机架，但是属于不同的**节点**
 
 ![block_placement_policy_default](./block_placement_policy_default.png)
 
@@ -441,7 +446,10 @@ SnapshotManager负责接收快照操作请求，继而调用相关类进行处�
 如果机架感知功能关闭并不会导致副本放置策略的失败，但是副本放置策略在这种情况下会失效。
 
 ```
-<property>￼  <name>net.topology.script.file.name</name>￼  <value>/path/to/rackAware.py</value>￼</property>
+<property>
+  <name>net.topology.script.file.name</name>￼
+  <value>/path/to/rackAware.py</value>￼
+</property>
 ```
 
 #### 2.4.3 默认副本放置策略的分析
@@ -472,7 +480,7 @@ LCA（最近公共祖先算法）
 
 1. 首节点的选择
 
-   - 如果writer请求方本身位于集群中的一个DataNode之上，则第一个副本的位置就在本地节点上
+   - （本地写优先）如果writer请求方本身位于集群中的一个DataNode之上，则第一个副本的位置就在本地节点上
    - 如果result中还是没有任何节点，则会从集群中随机挑选一个节点作为第一个节点
 
 2. 三副本位置的选取
@@ -483,13 +491,10 @@ LCA（最近公共祖先算法）
 
    优先级递减：
 
-   chooseLocalStorage
-
-   chooseLocalRack
-
-   chooseRemoteRack
-
-   chooseRandom
+   1. chooseLocalStorage
+2. chooseLocalRack
+   3. chooseRemoteRack
+4. chooseRandom
 
 #### 2.4.4 目标存储好坏的判断
 
@@ -521,7 +526,7 @@ LCA（最近公共祖先算法）
 我们需要有一种方式能够检测块当前的详细位置，这样我们才能判断是否满足HDFS的副本放置策略
 
 ```
- hdfs fsck <path> -files -blocks -locations
+hdfs fsck <path> -files -blocks -locations
 ```
 
 ### 2.5 HDFS内部的认证机制
@@ -534,7 +539,7 @@ BlockToken认证是基于令牌的块级别粒度的验证
 
 #### 2.5.2 HDFS的Sasl认证
 
-Sasl 是一套公开的认证机制，全称是Simple Authentication andSecurity Layer，中文翻译为“简单认证与安全层”，是一种用来扩充C/S模式验证能力的机制。
+Sasl 是一套公开的认证机制，全称是Simple Authentication and Security Layer，中文翻译为“简单认证与安全层”，是一种用来扩充C/S模式验证能力的机制。
 
 ##### 1. SaslClient与SaslServer的握手
 
@@ -555,13 +560,15 @@ Sasl 是一套公开的认证机制，全称是Simple Authentication andSecurity
 
 ##### 不同点
 
-- 认证维度不同。
+- 认证维度不同
 
-  BlockToken认证的粒度较细，是针对块级别的认证，会对每次的块操作做认证。Sasl则是针对每次数据传输操作做认证。
+  - BlockToken认证的粒度较细，是针对块级别的认证，会对每次的块操作做认证
+  - Sasl则是针对每次数据传输操作做认证。
 
-- 复杂性不同。
+- 复杂性不同
 
-  BlockToken的认证过程相对简单、清晰。而Sasl认证体系则复杂一些，会经过握手阶段，而且中间还可以配置相关的认证防护级别（Qop）的参数。论完整度而言，Sasl比BlockToken更加完整化、体系化一些。
+  - BlockToken的认证过程相对简单、清晰
+  - Sasl认证体系则复杂一些，会经过握手阶段，而且中间还可以配置相关的认证防护级别（Qop）的参数。论完整度而言，Sasl比BlockToken更加完整化、体系化一些。
 
 ### 2.6 HDFS内部的磁盘目录服务
 
@@ -571,7 +578,7 @@ HDFS在DataNode所在的节点中启动了多种磁盘目录的检测服务，�
 
 ##### DiskChecker（磁盘）
 
-**坏盘检测服务**。检测的级别是每个**磁盘**，检测的对象是FsVolume, FsVolume对应一个存储数据的磁盘。通过检测文件目录的访问权限以及目录是否可创建来判断目录所属磁盘的好坏，如果是坏盘，则此块盘将会被移除，上面的所有块都将被重新复制。
+**坏盘检测服务**。检测的级别是每个**磁盘**，检测的对象是FsVolume，FsVolume对应一个存储数据的磁盘。通过检测文件目录的访问权限以及目录是否可创建来判断目录所属磁盘的好坏，如果是坏盘，则此块盘将会被移除，上面的所有块都将被重新复制。
 
 ##### DirectoryScanner（目录）
 
@@ -583,7 +590,7 @@ HDFS在DataNode所在的节点中启动了多种磁盘目录的检测服务，�
 
 #### 2.6.2 DiskChecker：坏盘检测服务
 
-DiskChecker服务并不是一个周期性的定时任务，它只会在可能有坏盘出现的场景中被启动，然后执行
+DiskChecker服务并不是一个周期性的定时任务，它只会在可能有坏盘出现的场景中被启动，然后执行。
 
 ##### 1. DiskChecker何时被调用
 
@@ -591,24 +598,24 @@ DiskChecker服务并不是一个周期性的定时任务，它只会在可能有
 
 ##### 2. DiskChecker坏盘检测原理
 
-不同的BlockPool在每个盘上的存储是以BP打头的目录做区分的，类似格式如下，其中xx.xx. xx.xx代表的是当时做格式化操作的NameNode的ip地址：
+不同的BlockPool在每个盘上的存储是以BP打头的目录做区分的，类似格式如下，其中`xx.xx.xx.xx`代表的是当时做格式化操作的**NameNode**的IP地址：
 
 ```
 BP-805037254-xx.xx.xx.xx-1460537955319
 ```
 
-检测3类目录：
+###### 检测3类目录
 
-- finalizedDir目录，已经完成后的块文件存储目录，层级不止一层，子目录下还存在子目录，所以在此处需要递归地检查。
-- tmpDir临时目录，存储临时副本的目录。
-- rbwDir目录，正在写操作的文件会存放于此目录，写完成之后，会被移入到finalizedDir目录中。
+- finalizedDir目录：已经完成后的块文件存储目录，层级不止一层，子目录下还存在子目录，所以在此处需要递归地检查。
+- tmpDir临时目录：存储临时副本的目录。
+- rbwDir目录：正在写操作的文件会存放于此目录，写完成之后，会被移入到finalizedDir目录中。
 
-检测过程：
+###### 检测过程
 
-- 创建目录的检测。在这里会通过执行mkdir的方法来判断是否能够创建出目录。
-- 访问权限的检测。检测的逻辑是判断目录的是否能够进行读、写和执行。
+- 创建目录的检测：在这里会通过执行`mkdir`的方法来判断是否能够创建出目录。
+- 访问权限的检测：检测的逻辑是判断目录的是否能够进行读、写和执行。
 
-结果：
+##### 结果
 
 - 坏盘被DiskChecker检测出来之后，会在NameNode的50070端口页面中显示出来，集群管理人员看到了可以做后续的处理工作。
 
@@ -618,7 +625,7 @@ BP-805037254-xx.xx.xx.xx-1460537955319
 
 - 大量的坏盘导致DataNode启动的失败
 
-  配置：dfs.datanode.failed.volumes.tolerated
+  配置：`dfs.datanode.failed.volumes.tolerated`
 
 #### 2.6.3 DirectoryScanner：目录扫描服务
 
@@ -670,10 +677,10 @@ ViewFileSystem只是一个“视图”，它只是在表面上做了改变的文
 
 HDFS视图文件系统可以跨越多个集群，保持文件系统在逻辑上的一致性。
 
-使用DistCp工具进行远程拷贝存在的问题：
+若使用DistCp工具进行远程拷贝，来解决跨集群的目录访问，而存在的问题：
 
-- 拷贝周期太长，如果数据量非常大，在机房总带宽有限的情况下，拷贝的时间将会非常长。
-- 数据在拷贝的过程中，一定会有原始数据的变更与改动，如何同步这些数据也是需要考虑的方面。
+- 拷贝时间：拷贝周期太长，如果数据量非常大，在机房总带宽有限的情况下，拷贝的时间将会非常长。
+- 变更处理：数据在拷贝的过程中，一定会有原始数据的变更与改动，如何同步这些数据也是需要考虑的方面。
 
 #### 3.1.1 ViewFileSystem：视图文件系统
 
@@ -684,9 +691,9 @@ ViewFileSystem会在每个客户端中维护一份挂载关系表，就是上面
 例如：（前面是ViewFileSystem中的路径，后者才是代表的真正集群路径）
 
 ```
-        /user           -> hdfs://nn1/containingUserDir/user￼
-        /project/foo    -> hdfs://nn2/projects/foo￼
-        /project/bar    -> hdfs://nn3/projects/bar
+/user           -> hdfs://nn1/containingUserDir/user￼
+/project/foo    -> hdfs://nn2/projects/foo￼
+/project/bar    -> hdfs://nn3/projects/bar
 ```
 
 ![view_fs](./view_fs.png)
@@ -723,27 +730,27 @@ ViewFileSystem作为一个视图文件系统，要保持在逻辑上的完全一
 
 ##### 第一步，创建Viewfs名称
 
-在core-site.xml中配置fs.defaultFS属性，如下所示：
+在`core-site.xml`中配置`fs.defaultFS`属性，如下所示：
 
 ```
-        <property>￼
-          <name>fs.defaultFS</name>
-          <value>viewfs://MultipleCluster</value>￼
-        </property>
+<property>￼
+  <name>fs.defaultFS</name>
+  <value>viewfs://MultipleCluster</value>￼
+</property>
 ```
 
 ##### 第二步，添加挂载关系：
 
 ```
-        <property>￼
-          <name>fs.viewfs.mounttable.MultipleCluster.link./viewfstmp</name>￼
-          <value>hdfs://nn1/tmp</value>￼
-        </property>
+<property>￼
+  <name>fs.viewfs.mounttable.MultipleCluster.link./viewfstmp</name>￼
+  <value>hdfs://nn1/tmp</value>￼
+</property>
 ```
 
 ### 3.2 HDFS的Web文件系统：WebHdfsFileSystem
 
-历史：在HDFS中，如果用户想要对HDFS中的文件或目录做操作，他需要了解NameNode对外开发的方法，然后调用DFSClient对应的方法。
+背景：在HDFS的传统使用方式上中，如果用户想要对HDFS中的文件或目录做操作，他需要了解NameNode对外开发的方法，然后调用DFSClient对应的方法。
 
 WebHdfsFileSystem让HDFS以Web的形式展现给用户，用户通过调用相应的REST API即可完成文件、目录的操作。
 
@@ -847,7 +854,7 @@ OAuth2认证将会涉及以下3个角色：
 
 ### 3.3 HDFS数据加密空间：Encryption zone
 
-Encryption zone与之前的BlockToken验证相比，它更加注重于空间的特点，因为它只会对指定路径空间下的数据文件，做加、解密操作。
+Encryption zone与之前的BlockToken验证相比，它更加注重于空间的特点，因为它只会**对指定路径空间**下的数据文件，做加、解密操作。
 
 #### 3.3.1 Encryption zone原理介绍
 
@@ -889,26 +896,26 @@ Parity部分就是校验数据块，我们把一行数据块组称为条带（st
 
 ##### 优势
 
-- 存储空间的节省。EC技术的单副本可以为集群节省多副本机制造成的额外存储空间的使用
-- 带宽流量的节省。EC的使用，会使得写入集群的数据总量减少，进一步为集群节省了带宽的消耗
+- 存储空间的节省：EC技术的单副本可以为集群节省多副本机制造成的额外存储空间的使用
+- 带宽流量的节省：EC的使用，会使得写入集群的数据总量减少，进一步为集群节省了带宽的消耗
 
 ##### 劣势
 
 EC技术的优势确实明显，但是它的使用也是需要付出一定代价的。一旦数据需要恢复，它会造成两大资源的消耗：
 
-- 网络带宽的消耗，因为数据恢复需要去读其他的数据块和校验块。
-- 进行编码、解码计算时需要消耗CPU资源。
+- 网络带宽的消耗：因为数据恢复需要去读其他的数据块和校验块
+- CPU资源：进行编码、解码计算时需要消耗CPU资源
 
 ##### 最佳实践
 
-最好的选择是用于冷数据的存储。以下两点原因可以支持这种选择：
+最好的选择是用于冷数据的存储，原因如下：
 
-- 冷数据集群往往有大量的长期没有被访问的数据，数据规模确实会比较大，采用EC技术，可以大大减少副本数。
-- 冷数据集群基本稳定，耗资源量少，所以一旦进行数据恢复，也将不会对集群造成大的影响。
+- 数据量较大：冷数据集群往往有大量的长期没有被访问的数据，数据规模确实会比较大，采用EC技术，可以大大减少副本数
+- 资源较空闲：冷数据集群基本稳定，耗资源量少，所以一旦进行数据恢复，也将不会对集群造成大的影响
 
 #### 3.4.3 Hadoop纠删码概述
 
-注意：EC在Hadoop中的实现会直接改变原来HDFS默认的三副本策略，而副本数的减少会对MR任务的数据本地性造成一定影响。
+注意：EC在Hadoop中的实现会直接改变原来HDFS默认的三副本策略，而副本数的减少会对MR任务的数据**本地性**造成一定影响。
 
 Hadoop EC同样采用了master/slave的主从结构，在NameNode、DataNode、Client端都有相应的服务和角色。
 
@@ -944,7 +951,7 @@ Hadoop EC同样采用了master/slave的主从结构，在NameNode、DataNode、C
 
 Ozone的出现使得HDFS在使用方式上将会与原来块数据读写的方式有很大不同
 
-会以一个独立的block pool来存储Ozone上的数据，DataNode会同时为HDFS的block pool和Ozone的block pool存储数据
+会以一个**独立的block pool**来存储Ozone上的数据，DataNode会同时为HDFS的block pool和Ozone的block pool存储数据
 
 ##### 2. 存储容器（Storage Container）
 
@@ -1004,7 +1011,7 @@ fsck命令的全称是file system check，意为文件系统检测命令
 
 ```
 $ hdfs fsck￼
-Usage: hdfs fsck <path> [-list-corruptfileblocks  | [-move | -delete | -openforwrite] [-files [-blocks [-locations | -racks]]]]
+Usage: hdfs fsck <path> [-list-corruptfileblocks | [-move | -delete | -openforwrite] [-files [-blocks [-locations | -racks]]]]
 ```
 
 - \<path>: 目标扫描的路径名称
@@ -1032,11 +1039,11 @@ Usage: hdfs fsck <path> [-list-corruptfileblocks  | [-move | -delete | -openforw
 
 - 损坏块、丢失块的检查与处理
 
-  通过fsck命令附带上目标检查路径参数能够得到详细的检测结果。如果检测出有丢失或损坏的块，通过-delete参数可以直接进行删除，防止丢失的文件块造成程序执行的异常。
+  通过`fsck`命令附带上目标检查路径参数能够得到详细的检测结果。如果检测出有丢失或损坏的块，通过`-delete`参数可以直接进行删除，防止丢失的文件块造成程序执行的异常。
 
 - 块信息的查询
 
-  通过fsck的-files、-bloks等参数可以很详细地得到块存储位置等信息，甚至还能通过块Id查询该块对应的位置信息。
+  通过`fsck`的`-files`、`-blcoks`等参数可以很详细地得到块存储位置等信息，甚至还能通过块Id查询该块对应的位置信息。
 
 ### 4.2 HDFS如何检测并删除多余副本块
 
@@ -1192,7 +1199,7 @@ TransferFsImage指的是镜像文件的上传下载过程。
 
 #### HDFS的Quota限制
 
-Quota配额机制。HDFS中的配额机制指的是对于每个目录，我们可以设置该目录下的存储空间使用（space count）和命名空间使用（namespace count）计数，命名空间在此可理解为子文件数。
+Quota配额机制。HDFS中的配额机制指的是对于**每个目录**，我们可以设置该目录下的存储空间使用（space count）和命名空间使用（namespace count）计数，命名空间在此可理解为子文件数。
 
 通过配额机制我们可以很好地防止在目录下创建过多的文件或写入过量的数据。否则，就会抛出异常。
 
@@ -1206,7 +1213,7 @@ Balancer工具的作用是将数据块从高数据使用量节点移动到低数
 
 Balancer和Dispatcher是与HDFS Balancer操作最紧密关联的类。
 
-- Balancer类负责找出<source, target>这样的起始、目标节点对，然后存入到Dispatcher类中
+- Balancer类负责找出`<source, target>`这样的起始、目标节点对，然后存入到Dispatcher类中
 - 通过Dispatcher对象进行分发。不过在分发之前，会进行块的验证，判断此块是否能被移动，这里会涉及一些条件的判断。
   - 待移动的块不是正在被移动的块
   - 在目标节点上没有此移动块的副本
@@ -1223,14 +1230,14 @@ Balancer工具是专门用来解决数据不平衡问题的。但也存在一些
 
 - 大数据块在相同时间段内数据平衡效率要远高于小数据块
 - 加大数据平衡的带宽：`hdfs dfsadmin -setBandwidth <bandwidth> `。但这有可能影响正常的读写。
-- 制定目标节点进行数据平衡：使用-include、-exclude参数，专门对节点数据量少于平均值和数据量大于平均值的节点做数据平衡
+- 制定目标节点进行数据平衡：使用`-include`、`-exclude`参数，专门对节点数据量少于平均值和数据量大于平均值的节点做数据平衡
 - 新增参数：
   - blockBytesNum最小字节限制：在每次筛选块的时候，额外做一次块大小的筛选判断
   - maxIterationTime每次迭代最长时间限制
   - maxNoPendingMoveIterations没有可移动块情况下的最大迭代次数
   - noPendingMoveSleepTime没有可移动块时的睡眠时间。这个参数指的是Balancer程序在没有找到可移动块前提下的缓冲时间
 
-### 5.3 HDFS节点内数据平衡
+### 5.3 HDFS节点内数据平衡，DiskBalancer
 
 磁盘间数据的不同会造成磁盘IO压力的不同
 
@@ -1363,7 +1370,7 @@ Plan内部由各个Step组成，Step中会指定好源、目标磁盘。
 
 #### 6.1.4 HDFS镜像文件的解析与反解析命令
 
-HDFS关于镜像解析的命令主要以`hdfs oiv`打头，oiv为OffineImageView的缩写。
+HDFS关于镜像解析的命令主要以`hdfs oiv`打头，oiv为Offine Image View的缩写。
 
 5大处理器：
 
@@ -1373,15 +1380,15 @@ HDFS关于镜像解析的命令主要以`hdfs oiv`打头，oiv为OffineImageView
 - Web
 - Delimited
 
-命令：`Usage: bin/hdfs oiv -p XML/ReverseXML -i INPUTFILE -o OUTPUTFILE`
+命令：`hdfs oiv -p XML/ReverseXML -i INPUTFILE -o OUTPUTFILE`
 
 使用场景：
 
-- 统计文件大小分布：`bin/hdfs oiv -p FileDistribution -i INPUTFILE -o OUTPUTFILE`
+- 统计文件大小分布：`hdfs oiv -p FileDistribution -i INPUTFILE -o OUTPUTFILE`
 
 ##### 用hdfs oev命令分析editlog文件
 
-oev是OffineEditsViewer的缩写
+`oev`是Offine Edits Viewer的缩写
 
 分析editlog日志文件的工具命令
 
@@ -1599,7 +1606,7 @@ DistCp工具在Hadoop中的定位就是用于数据迁移的，针对的就是�
 
 ##### 带宽限流
 
-DistCp是支持带宽限流的，使用者可以通过命令参数bandwidth来为程序进行限流，原理类似于HDFS中数据Balancer程序的限流。
+DistCp是支持带宽限流的，使用者可以通过命令参数`bandwidth`来为程序进行限流，原理类似于HDFS中数据Balancer程序的限流。
 
 ##### 增量数据同步
 
@@ -1613,7 +1620,7 @@ DistCp是支持带宽限流的，使用者可以通过命令参数bandwidth来�
 
 - 执行的分布式特性
 
-  DistCp本身会构造成一个MR的Job。它是一个纯由Map任务构成的Job，注意它是没有Reduce过程的。所以它能够把集群资源利用起来，集群闲下来的资源越多，它运行得就越快。
+  DistCp本身会构造成一个MR的Job。它是一个**纯由Map任务构成的Job**，注意它是没有Reduce过程的。所以它能够把集群资源利用起来，集群闲下来的资源越多，它运行得就越快。
 
 - 高效的MR组件
   - 在HDFS上拆分拷贝列表到更小粒度单元的chunk
@@ -1642,7 +1649,7 @@ $ hadoop distcp￼
 
 ##### 源端无变更
 
-源端集群数据不会发生变更，是一堆静态数据。这种同步方式很简单，用distcp命令指明好源集群、目标集群地址，对想要同步数据的最顶层目录进行同步即可
+源端集群数据不会发生变更，是一堆静态数据。这种同步方式很简单，用`distcp`命令指明好源集群、目标集群地址，对想要同步数据的最顶层目录进行同步即可
 
 ##### 源端有变更
 
@@ -1653,7 +1660,7 @@ $ hadoop distcp￼
 3. 等第一轮的快照同步结束之后，可以在源集群上的同样目录下创建第二个快照，再次做数据同步。这个时候可以使用一些-delete、-update的参数来同步发生变更的数据文件，而不是所有文件再次进行扫描同步
 4. 以此类推，当最终源端创建的快照与目标集群的数据几乎没有太大差别的时候，就可以做一次切换，将集群地址从源集群切到目标集群
 
-注意事项：
+##### 注意事项
 
 - 设置好路径
 
@@ -1661,11 +1668,11 @@ $ hadoop distcp￼
 
 - 及时删除丢失块
 
-  集群中丢失的块会导致distcp拷贝任务的失败退出。在数据同步的过程中，要及时留意NameNode页面上是否有丢失或损坏的块。如果存在则尽快用fsck \<path> -delete进行删除。
+  集群中丢失的块会导致distcp拷贝任务的失败退出。在数据同步的过程中，要及时留意NameNode页面上是否有丢失或损坏的块。如果存在则尽快用`fsck \<path> -delete`进行删除。
 
 - 权限信息保留
 
-  注意数据权限等属性信息的保留，可以用-p加上想要保留属性的对应参数。因为如果没有保留属性信息的话，拷贝到目标集群的数据在运行任务的时候可能会造成文件所属用户读写数据失败的情况
+  注意数据权限等属性信息的保留，可以用`-p`加上想要保留属性的对应参数。因为如果没有保留属性信息的话，拷贝到目标集群的数据在运行任务的时候可能会造成文件所属用户读写数据失败的情况
 
 ### 7.4 DataNode迁移方案
 
@@ -1714,7 +1721,7 @@ DataNode自身节点的搬迁。在搬迁的过程中，此节点将会停止服
 - 使用`jps`命令查看NN/DN是否真正停止
 - 停止DN后，观察NN的Web界面，在超时后（默认630秒），该DN将被显示为dead状态，意为死节点
 - 在NN Web界面的待复制块（Number of Under-ReplicatedBlocks）指标，会显示正在进行拷贝的块副本数
-- DN在初次启动的时候由于缓存的dfsUsed值超过默认600秒会过期，需要重新执行du命令扫描DataNode上面的磁盘块进行dfsUsed使用量的计算，会消耗几分钟的时间
+- DN在再次启动的时候由于缓存的dfsUsed值超过默认600秒会过期，需要重新执行du命令扫描DataNode上面的磁盘块进行dfsUsed使用量的计算，会消耗几分钟的时间
   - 如果是立即停止，并马上重启DataNode，du过程则将会非常快
   - 出现如下`Time taken`开头的日志代表磁盘扫描操作结束，DN启动成功了：
 
@@ -1907,7 +1914,7 @@ DataNode的慢启动不会导致它上面的数据发生丢失，但是它会影
 
 #### 9.1.3 参数可配置化改造
 
-hdfs-default.xml
+##### hdfs-default.xml
 
 ```
 <property>￼
